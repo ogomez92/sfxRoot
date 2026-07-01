@@ -73,7 +73,6 @@ export interface McpStatus {
 	running: boolean;
 	port: number;
 	dbPath: string | null;
-	mcpScriptPath: string | null;
 }
 
 export const mcp = {

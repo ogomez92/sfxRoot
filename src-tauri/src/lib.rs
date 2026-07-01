@@ -6,6 +6,7 @@ pub mod commands;
 pub mod db;
 pub mod error;
 pub mod indexing;
+pub mod mcp_server;
 pub mod state;
 
 use tauri::Manager;
@@ -61,9 +62,9 @@ pub fn run() {
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                // Kill MCP child process when the window closes
+                // Stop the in-process MCP server when the window closes
                 if let Some(mcp_state) = _window.try_state::<McpState>() {
-                    mcp_state.kill_child();
+                    mcp_state.shutdown();
                 }
             }
         })

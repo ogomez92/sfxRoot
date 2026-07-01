@@ -3,7 +3,7 @@
 	import { Button } from './index';
 	import { onMount, onDestroy } from 'svelte';
 
-	let status = $state<McpStatus>({ running: false, port: 3839, dbPath: null, mcpScriptPath: null });
+	let status = $state<McpStatus>({ running: false, port: 3839, dbPath: null });
 	let port = $state(3839);
 	let error = $state('');
 	let hostname = $state('localhost');
@@ -96,11 +96,6 @@
 	}
 
 	let sseUrl = $derived(`http://${hostname}:${port}/sse`);
-	let localStdioCmd = $derived(
-		status.dbPath && status.mcpScriptPath
-			? `claude mcp add sfxroot -- node ${status.mcpScriptPath} ${status.dbPath}`
-			: null
-	);
 	let remoteCmd = $derived(
 		`claude mcp add sfxroot --transport sse ${sseUrl}`
 	);
@@ -171,22 +166,12 @@
 				<h3 class="section-title">Add to Claude Code</h3>
 
 				<div class="command-block">
-					<div class="command-label">Remote / Tailscale (SSE):</div>
+					<div class="command-label">SSE (local or remote / Tailscale):</div>
 					<div class="command-row">
 						<code class="command">{remoteCmd}</code>
 						<Button onclick={() => copyText(remoteCmd)} variant="ghost" size="sm">Copy</Button>
 					</div>
 				</div>
-
-				{#if localStdioCmd}
-					<div class="command-block">
-						<div class="command-label">Local (stdio, no server needed):</div>
-						<div class="command-row">
-							<code class="command">{localStdioCmd}</code>
-							<Button onclick={() => copyText(localStdioCmd!)} variant="ghost" size="sm">Copy</Button>
-						</div>
-					</div>
-				{/if}
 			</div>
 
 			<div class="section">

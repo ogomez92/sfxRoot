@@ -1,12 +1,17 @@
 //! MCP server management commands.
+//!
+//! The MCP server is now an in-process axum HTTP+SSE server (see
+//! `crate::mcp_server`), so there is no Node sidecar to spawn anymore.
 
-use std::process::Command as StdCommand;
 use std::sync::Mutex;
 
 use serde::Serialize;
 use tauri::State;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use crate::error::{Result, SfxError};
+use crate::mcp_server;
 use crate::state::AppState;
 
 /// MCP server status info returned to the frontend.
@@ -16,122 +21,98 @@ pub struct McpStatus {
     pub running: bool,
     pub port: u16,
     pub db_path: Option<String>,
-    pub mcp_script_path: Option<String>,
 }
 
-/// Shared state for the MCP child process.
+struct RunningServer {
+    shutdown: oneshot::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+/// Shared state for the in-process MCP server.
 pub struct McpState {
-    child: Mutex<Option<std::process::Child>>,
+    inner: Mutex<Option<RunningServer>>,
     port: Mutex<u16>,
 }
 
 impl McpState {
     pub fn new() -> Self {
         Self {
-            child: Mutex::new(None),
+            inner: Mutex::new(None),
             port: Mutex::new(3839),
         }
     }
 
-    /// Kill the MCP child process if running.
-    pub fn kill_child(&self) {
-        let mut child_lock = self.child.lock().unwrap();
-        if let Some(ref mut child) = *child_lock {
-            let _ = child.kill();
-            let _ = child.wait();
+    /// Stop the running MCP server, if any. Safe to call from non-async
+    /// contexts (e.g. the window-destroyed event handler).
+    pub fn shutdown(&self) {
+        let running = self.inner.lock().unwrap().take();
+        if let Some(running) = running {
+            let _ = running.shutdown.send(());
+            running.handle.abort();
         }
-        *child_lock = None;
     }
 }
 
 impl Drop for McpState {
     fn drop(&mut self) {
-        self.kill_child();
+        self.shutdown();
     }
 }
 
-/// Start the MCP server as a child process.
+fn is_running(state: &McpState) -> bool {
+    let mut guard = state.inner.lock().unwrap();
+    if let Some(running) = guard.as_ref() {
+        if running.handle.is_finished() {
+            *guard = None;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    }
+}
+
+/// Start the in-process MCP server on the given port.
 #[tauri::command]
 pub async fn mcp_start(
+    app: tauri::AppHandle,
     port: u16,
     app_state: State<'_, AppState>,
     mcp_state: State<'_, McpState>,
 ) -> Result<McpStatus> {
-    // Check if already running
-    {
-        let mut child_lock = mcp_state.child.lock().unwrap();
-        if let Some(ref mut child) = *child_lock {
-            // Check if still alive
-            match child.try_wait() {
-                Ok(None) => {
-                    // Still running
-                    let db_path = app_state.get_db_path().map(|p| p.display().to_string());
-                    return Ok(McpStatus {
-                        running: true,
-                        port,
-                        db_path,
-                        mcp_script_path: find_mcp_script().ok(),
-                    });
-                }
-                _ => {
-                    // Dead, clear it
-                    *child_lock = None;
-                }
-            }
-        }
+    if is_running(&mcp_state) {
+        let db_path = app_state.get_db_path().map(|p| p.display().to_string());
+        return Ok(McpStatus {
+            running: true,
+            port: *mcp_state.port.lock().unwrap(),
+            db_path,
+        });
     }
 
-    let db_path = app_state
-        .get_db_path()
-        .ok_or(SfxError::DatabaseNotOpen)?;
-
-    let db_path_str = db_path.display().to_string();
-
-    // Find the MCP server script relative to the app
-    // In development, it's at ../../mcp-server/dist/index.js relative to src-tauri
-    // In production, it's bundled as a resource
-    let mcp_script = find_mcp_script()?;
-
-    let mut cmd = StdCommand::new("node");
-    cmd.arg(&mcp_script)
-        .env("SFXROOT_DB_PATH", &db_path_str)
-        .env("MCP_TRANSPORT", "sse")
-        .env("MCP_PORT", port.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    // On Windows, prevent a console window from flashing and ensure the
-    // child process survives without a valid console handle.
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+    if !app_state.is_db_open() {
+        return Err(SfxError::DatabaseNotOpen);
     }
 
-    let child = cmd.spawn().map_err(SfxError::Io)?;
+    let (handle, shutdown) = mcp_server::start(app.clone(), port)
+        .await
+        .map_err(SfxError::Io)?;
 
-    *mcp_state.child.lock().unwrap() = Some(child);
+    *mcp_state.inner.lock().unwrap() = Some(RunningServer { shutdown, handle });
     *mcp_state.port.lock().unwrap() = port;
 
+    let db_path = app_state.get_db_path().map(|p| p.display().to_string());
     Ok(McpStatus {
         running: true,
         port,
-        db_path: Some(db_path_str),
-        mcp_script_path: Some(mcp_script),
+        db_path,
     })
 }
 
 /// Stop the MCP server.
 #[tauri::command]
 pub async fn mcp_stop(mcp_state: State<'_, McpState>) -> Result<()> {
-    let mut child_lock = mcp_state.child.lock().unwrap();
-    if let Some(ref mut child) = *child_lock {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    *child_lock = None;
+    mcp_state.shutdown();
     Ok(())
 }
 
@@ -141,27 +122,14 @@ pub async fn mcp_status(
     app_state: State<'_, AppState>,
     mcp_state: State<'_, McpState>,
 ) -> Result<McpStatus> {
+    let running = is_running(&mcp_state);
     let port = *mcp_state.port.lock().unwrap();
     let db_path = app_state.get_db_path().map(|p| p.display().to_string());
-
-    let mut child_lock = mcp_state.child.lock().unwrap();
-    let running = if let Some(ref mut child) = *child_lock {
-        match child.try_wait() {
-            Ok(None) => true,
-            _ => {
-                *child_lock = None;
-                false
-            }
-        }
-    } else {
-        false
-    };
 
     Ok(McpStatus {
         running,
         port,
         db_path,
-        mcp_script_path: find_mcp_script().ok(),
     })
 }
 
@@ -264,59 +232,3 @@ User: "I need a short explosion sound, WAV format"
 4. `cp "/library/path/explosion_01.wav" "./assets/audio/explosion.wav"`
 5. Confirm: "Copied explosion_01.wav (1.2s, 44.1kHz stereo WAV, 210KB) to ./assets/audio/"
 "#;
-
-/// Find the MCP server script path.
-fn find_mcp_script() -> Result<String> {
-    // Try several locations
-    let candidates = [
-        // Development: relative to the project root
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join("mcp-server/dist/index.js"),
-        // Development: relative to src-tauri
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join("../mcp-server/dist/index.js"),
-        // Alongside the executable
-        std::env::current_exe()
-            .unwrap_or_default()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("mcp-server/dist/index.js"),
-        // macOS app bundle: Contents/Resources
-        std::env::current_exe()
-            .unwrap_or_default()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("../Resources/mcp-server/dist/index.js"),
-    ];
-
-    for candidate in &candidates {
-        if candidate.exists() {
-            // Normalize away ".." segments so the path is clean for Node.js.
-            // We avoid std canonicalize() because on Windows it produces
-            // \\?\ UNC prefixed paths that Node.js cannot load.
-            let path = normalize_path(candidate);
-            return Ok(path.display().to_string());
-        }
-    }
-
-    Err(SfxError::InvalidPath(
-        "MCP server script not found. Make sure mcp-server is built (cd mcp-server && npm run build)".to_string(),
-    ))
-}
-
-/// Resolve `.` and `..` segments without calling `canonicalize()`,
-/// which on Windows adds a `\\?\` UNC prefix that breaks Node.js.
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::{Component, PathBuf};
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::ParentDir => { out.pop(); }
-            Component::CurDir => {}
-            other => out.push(other),
-        }
-    }
-    out
-}

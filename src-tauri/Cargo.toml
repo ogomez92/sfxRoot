@@ -27,7 +27,14 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "net", "macros"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# In-process MCP server (replaces former Node sidecar)
+axum = "0.7"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # File operations
 walkdir = "2"
