@@ -8,6 +8,12 @@ export interface Directory {
 	createdAt: number;
 }
 
+export interface IncompleteDirectory {
+	id: number;
+	path: string;
+	indexedCount: number;
+}
+
 export interface SoundFile {
 	id: number;
 	directoryId: number;
@@ -31,7 +37,7 @@ export interface SoundFile {
 }
 
 export interface QueryOptions {
-	search?: string;
+	query?: string;
 	directoryId?: number;
 	minDurationMs?: number;
 	maxDurationMs?: number;

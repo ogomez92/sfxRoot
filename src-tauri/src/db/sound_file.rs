@@ -249,6 +249,22 @@ impl<'a> SoundFileRepository<'a> {
         Ok(files)
     }
 
+    /// List only the `full_path` of every sound file in a directory.
+    ///
+    /// A lightweight alternative to [`list_by_directory`] for cases that only
+    /// need to know which files are already indexed (e.g. resuming an
+    /// interrupted index). Avoids materializing full `SoundFile` rows, which
+    /// matters for directories with millions of entries.
+    pub fn list_paths_by_directory(&self, directory_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT full_path FROM sound_files WHERE directory_id = ?")?;
+        let paths = stmt
+            .query_map(params![directory_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(paths)
+    }
+
     /// Count sound files in a directory.
     pub fn count_by_directory(&self, directory_id: i64) -> Result<i64> {
         let count: i64 = self.conn.query_row(

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Directory, IndexingProgress } from '$lib/types';
+	import type { Directory, IncompleteDirectory, IndexingProgress } from '$lib/types';
 	import { db, directories, indexing } from '$lib/api';
 	import { Button, ProgressBar, Dialog, LiveRegion } from './index';
 	import DirectoryList from './DirectoryList.svelte';
@@ -14,6 +14,7 @@
 	}
 
 	let directoriesList = $state<Directory[]>([]);
+	let incompleteDirs = $state<IncompleteDirectory[]>([]);
 	let isIndexing = $state(false);
 	let progress = $state<IndexingProgress | null>(null);
 	let statusMessage = $state('');
@@ -110,9 +111,49 @@
 	async function loadDirectories() {
 		try {
 			directoriesList = await directories.list();
+			await checkIncomplete();
 		} catch (e) {
 			console.error('Load directories error:', e);
 			statusMessage = `Error loading directories: ${getErrorMessage(e)}`;
+		}
+	}
+
+	async function checkIncomplete() {
+		try {
+			incompleteDirs = await directories.incomplete();
+			if (incompleteDirs.length > 0) {
+				statusPoliteness = 'assertive';
+				statusMessage = `${incompleteDirs.length} interrupted ${
+					incompleteDirs.length === 1 ? 'index' : 'indexes'
+				} can be resumed`;
+				setTimeout(() => {
+					statusPoliteness = 'polite';
+				}, 100);
+			}
+		} catch (e) {
+			console.error('Check incomplete error:', e);
+			incompleteDirs = [];
+		}
+	}
+
+	function directoryName(path: string): string {
+		return path.split(/[/\\]/).pop() || path;
+	}
+
+	async function handleResumeDirectory(id: number) {
+		isIndexing = true;
+		lastAnnouncedPercent = -1;
+		statusMessage = 'Resuming indexing...';
+		try {
+			await indexing.resume(id);
+		} catch (e) {
+			console.error('Resume directory error:', e);
+			statusPoliteness = 'assertive';
+			statusMessage = `Error resuming: ${getErrorMessage(e)}`;
+			setTimeout(() => {
+				statusPoliteness = 'polite';
+			}, 100);
+			isIndexing = false;
 		}
 	}
 
@@ -296,6 +337,36 @@
 		</div>
 	{/if}
 
+	{#if incompleteDirs.length > 0 && !isIndexing}
+		<div class="resume-banner" role="alert">
+			<div class="resume-banner-header">
+				<span class="resume-icon" aria-hidden="true">⚠</span>
+				<span class="resume-title">Interrupted indexing detected</span>
+			</div>
+			<p class="resume-desc text-sm text-slate-600 dark:text-slate-300">
+				These directories were still being indexed when the app last closed. Resuming picks up
+				where it left off — already-indexed files are skipped.
+			</p>
+			<ul class="resume-list">
+				{#each incompleteDirs as dir (dir.id)}
+					<li class="resume-item">
+						<div class="resume-item-text">
+							<span class="resume-item-name font-mono" title={dir.path}>
+								{directoryName(dir.path)}
+							</span>
+							<span class="text-sm text-slate-500 dark:text-slate-400">
+								{dir.indexedCount.toLocaleString()} files indexed so far
+							</span>
+						</div>
+						<Button size="sm" variant="primary" onclick={() => handleResumeDirectory(dir.id)}>
+							Resume
+						</Button>
+					</li>
+				{/each}
+			</ul>
+		</div>
+	{/if}
+
 	<DirectoryList
 		directories={directoriesList}
 		onRemove={handleRemoveDirectory}
@@ -387,6 +458,73 @@
 		100% {
 			left: 100%;
 		}
+	}
+
+	.resume-banner {
+		padding: 1rem;
+		margin-bottom: 1rem;
+		background: #fffbeb;
+		border: 1px solid #fbbf24;
+		border-radius: 0.5rem;
+	}
+
+	:global(.dark) .resume-banner {
+		background: #291a03;
+		border-color: #78560a;
+	}
+
+	.resume-banner-header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.25rem;
+	}
+
+	.resume-icon {
+		color: #d97706;
+		font-size: 1.1rem;
+	}
+
+	.resume-title {
+		font-weight: 600;
+	}
+
+	.resume-desc {
+		margin-bottom: 0.75rem;
+	}
+
+	.resume-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+
+	.resume-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--color-surface);
+		border: 1px solid var(--color-border);
+		border-radius: 0.375rem;
+	}
+
+	.resume-item-text {
+		display: flex;
+		flex-direction: column;
+		gap: 0.125rem;
+		min-width: 0;
+	}
+
+	.resume-item-name {
+		font-size: 0.875rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.resync-stats {

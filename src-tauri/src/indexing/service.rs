@@ -201,6 +201,219 @@ impl IndexingService {
         ))
     }
 
+    /// Resume an interrupted initial index of a directory.
+    ///
+    /// When [`index_directory`](Self::index_directory) is interrupted (app
+    /// crash or user cancellation) the directory row is left with
+    /// `last_synced_at = NULL` and only the batches that had committed are
+    /// present. This method finishes the job: it scans the directory, skips
+    /// every file already in the database (matching by `full_path`), and
+    /// extracts + inserts only the missing ones, then marks the directory
+    /// synced.
+    ///
+    /// Unlike [`resync_directory`](Self::resync_directory) it never re-extracts
+    /// metadata for existing files and never deletes rows, so it only needs the
+    /// set of already-indexed *paths* in memory rather than full rows — a large
+    /// difference for directories with millions of files. It is safe to run
+    /// repeatedly; a cancelled resume simply leaves the directory resumable
+    /// again.
+    pub fn resume_directory<F>(
+        &self,
+        db: &DatabaseConnection,
+        directory_id: i64,
+        progress_callback: F,
+    ) -> Result<IndexingResult>
+    where
+        F: Fn(IndexingProgress) + Send + Sync,
+    {
+        self.cancel_flag.store(false, Ordering::SeqCst);
+
+        let dir_repo = DirectoryRepository::new(db.conn());
+        let file_repo = SoundFileRepository::new(db.conn());
+
+        // Get directory
+        let directory = dir_repo
+            .get_by_id(directory_id)?
+            .ok_or_else(|| SfxError::DirectoryNotFound(format!("ID: {}", directory_id)))?;
+
+        // Verify directory exists on disk
+        let path = Path::new(&directory.path);
+        if !path.exists() || !path.is_dir() {
+            return Err(SfxError::DirectoryNotFound(directory.path.clone()));
+        }
+
+        // Phase 1: Scanning with progress
+        progress_callback(IndexingProgress {
+            phase: "discovering".to_string(),
+            current: 0,
+            total: 0,
+            current_file: None,
+            stats: None,
+        });
+
+        let scanned_files = scan_directory_with_progress(path, Some(|phase: &str, current: usize, total: usize, file: &str| {
+            progress_callback(IndexingProgress {
+                phase: phase.to_string(),
+                current,
+                total,
+                current_file: if file.is_empty() { None } else { Some(file.to_string()) },
+                stats: None,
+            });
+        }));
+
+        // Phase 2: Determine which scanned files are not yet in the database.
+        // Only the already-indexed paths are loaded (memory-light).
+        progress_callback(IndexingProgress {
+            phase: "comparing".to_string(),
+            current: 0,
+            total: scanned_files.len(),
+            current_file: None,
+            stats: None,
+        });
+
+        let existing_paths: std::collections::HashSet<String> = file_repo
+            .list_paths_by_directory(directory_id)?
+            .into_iter()
+            .collect();
+
+        let new_files: Vec<&ScannedFile> = scanned_files
+            .iter()
+            .filter(|f| !existing_paths.contains(f.full_path.to_string_lossy().as_ref()))
+            .collect();
+
+        let already_indexed = scanned_files.len().saturating_sub(new_files.len());
+        let stats = ResyncStats {
+            unchanged: already_indexed,
+            modified: 0,
+            added: new_files.len(),
+            deleted: 0,
+        };
+
+        progress_callback(IndexingProgress {
+            phase: "comparing".to_string(),
+            current: scanned_files.len(),
+            total: scanned_files.len(),
+            current_file: None,
+            stats: Some(stats.clone()),
+        });
+
+        if self.is_cancelled() {
+            return Ok(IndexingResult::cancelled(directory_id, 0));
+        }
+
+        // Nothing new to add: the index was already complete on disk, just
+        // finalize the bookkeeping that the interrupted run never reached.
+        if new_files.is_empty() {
+            let final_count = file_repo.count_by_directory(directory_id)?;
+            dir_repo.update_file_count(directory_id, final_count)?;
+            dir_repo.update_last_synced_at(directory_id, Self::now())?;
+            let _ = db.cleanup_wal();
+            return Ok(IndexingResult::new(directory_id, already_indexed, 0, 0)
+                .with_resync_stats(&stats));
+        }
+
+        // Phase 3: Extract metadata and insert new files in batches.
+        let total = new_files.len();
+        let mut error_count = 0;
+        let mut processed_count = 0;
+
+        progress_callback(IndexingProgress {
+            phase: "extracting".to_string(),
+            current: 0,
+            total,
+            current_file: None,
+            stats: Some(stats.clone()),
+        });
+
+        for (batch_idx, batch) in new_files.chunks(BATCH_SIZE).enumerate() {
+            if self.is_cancelled() {
+                return Ok(IndexingResult::cancelled(directory_id, processed_count));
+            }
+
+            let batch_start = batch_idx * BATCH_SIZE;
+
+            let paths: Vec<String> = batch
+                .iter()
+                .map(|f| f.full_path.to_string_lossy().into_owned())
+                .collect();
+
+            let metadata_results = extract_batch(&paths, Some(|current: usize, _total: usize, file: &str| {
+                progress_callback(IndexingProgress {
+                    phase: "extracting".to_string(),
+                    current: batch_start + current,
+                    total,
+                    current_file: Some(file.to_string()),
+                    stats: Some(stats.clone()),
+                });
+            }));
+
+            if self.is_cancelled() {
+                return Ok(IndexingResult::cancelled(directory_id, processed_count));
+            }
+
+            let sound_files: Vec<SoundFileInsert> = batch
+                .iter()
+                .zip(metadata_results.iter())
+                .map(|(scanned, meta_result)| {
+                    if meta_result.error.is_some() {
+                        error_count += 1;
+                    }
+                    let meta = meta_result.metadata.as_ref();
+
+                    SoundFileInsert {
+                        directory_id,
+                        relative_path: scanned.relative_path.clone(),
+                        filename: scanned.filename.clone(),
+                        full_path: scanned.full_path.to_string_lossy().into_owned(),
+                        extension: scanned.extension.clone(),
+                        file_size: scanned.file_size as i64,
+                        modified_at: scanned.modified_at,
+                        duration_ms: meta.and_then(|m| m.duration_ms),
+                        sample_rate: meta.and_then(|m| m.sample_rate),
+                        channels: meta.and_then(|m| m.channels),
+                        bit_rate: meta.and_then(|m| m.bit_rate),
+                        codec: meta.and_then(|m| m.codec.clone()),
+                        title: meta.and_then(|m| m.title.clone()),
+                        artist: meta.and_then(|m| m.artist.clone()),
+                        album: meta.and_then(|m| m.album.clone()),
+                        genre: meta.and_then(|m| m.genre.clone()),
+                        comment: meta.and_then(|m| m.comment.clone()),
+                    }
+                })
+                .collect();
+
+            progress_callback(IndexingProgress {
+                phase: "saving".to_string(),
+                current: batch_start + batch.len(),
+                total,
+                current_file: None,
+                stats: Some(stats.clone()),
+            });
+
+            file_repo.insert_batch(&sound_files)?;
+            processed_count += sound_files.len();
+
+            // Checkpoint every 10 batches to balance durability vs performance.
+            if (batch_idx + 1) % 10 == 0 {
+                db.checkpoint()?;
+            }
+        }
+
+        // Final checkpoint before cleanup.
+        db.checkpoint()?;
+
+        // Update directory stats to reflect everything now in the database.
+        let final_count = file_repo.count_by_directory(directory_id)?;
+        dir_repo.update_file_count(directory_id, final_count)?;
+        dir_repo.update_last_synced_at(directory_id, Self::now())?;
+
+        // Clean up WAL/SHM files (non-fatal if it fails).
+        let _ = db.cleanup_wal();
+
+        Ok(IndexingResult::new(directory_id, total, processed_count, error_count)
+            .with_resync_stats(&stats))
+    }
+
     /// Resync an existing directory (smart resync).
     pub fn resync_directory<F>(
         &self,

@@ -56,7 +56,7 @@
 	// Build query options from current filter state
 	function buildQueryOptions(offset?: number, limit?: number): QueryOptions {
 		return {
-			search: searchQuery || undefined,
+			query: searchQuery || undefined,
 			minDurationMs: minDuration ?? undefined,
 			maxDurationMs: maxDuration ?? undefined,
 			sortBy,
@@ -184,8 +184,12 @@
 				files = [];
 				totalCount = 0;
 			}
-		} catch (_e) {
-			// Database not open
+		} catch (e) {
+			// Surface the failure instead of silently showing "0 files".
+			console.error('Load database window error:', e);
+			liveRegionPoliteness = 'assertive';
+			statusMessage = `Error loading database: ${e instanceof Error ? e.message : String(e)}`;
+			setTimeout(() => { liveRegionPoliteness = 'polite'; }, 100);
 		}
 	}
 

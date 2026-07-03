@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type {
 	Directory,
+	IncompleteDirectory,
 	SoundFile,
 	QueryOptions,
 	IndexingProgress,
@@ -27,7 +28,8 @@ export const directories = {
 	list: (): Promise<Directory[]> => invoke('directories_list'),
 	add: (path: string): Promise<Directory> => invoke('directories_add', { path }),
 	remove: (id: number): Promise<void> => invoke('directories_remove', { id }),
-	get: (id: number): Promise<Directory | null> => invoke('directories_get', { id })
+	get: (id: number): Promise<Directory | null> => invoke('directories_get', { id }),
+	incomplete: (): Promise<IncompleteDirectory[]> => invoke('directories_incomplete')
 };
 
 // Indexing commands
@@ -35,6 +37,8 @@ export const indexing = {
 	start: (path: string): Promise<IndexingResult> => invoke('indexing_start', { path }),
 	resync: (directoryId: number): Promise<IndexingResult> =>
 		invoke('indexing_resync', { directoryId }),
+	resume: (directoryId: number): Promise<IndexingResult> =>
+		invoke('indexing_resume', { directoryId }),
 	cancel: (): Promise<void> => invoke('indexing_cancel'),
 
 	// Event listeners

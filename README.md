@@ -26,22 +26,22 @@ git clone https://github.com/ogomez92/sfxroot.git
 cd sfxroot
 
 # Install frontend dependencies
-npm install
+pnpm install
 
 # Build the MCP server
 cd mcp-server
-npm install
-npm run build
+pnpm install
+pnpm build
 cd ..
 
 # Run in development mode
-npm run tauri dev
+pnpm tauri dev
 ```
 
 ## Building for Production
 
 ```bash
-npm run tauri build
+pnpm tauri build
 ```
 
 The installer/bundle will be output to `src-tauri/target/release/bundle/`.

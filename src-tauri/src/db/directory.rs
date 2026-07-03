@@ -74,6 +74,32 @@ impl<'a> DirectoryRepository<'a> {
         Ok(directories)
     }
 
+    /// List directories whose indexing never completed.
+    ///
+    /// `last_synced_at` is only written when an index or resync finishes, so a
+    /// NULL value means the operation was interrupted (crashed or cancelled)
+    /// and can be resumed.
+    pub fn list_incomplete(&self) -> Result<Vec<Directory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, file_count, last_synced_at, created_at \
+             FROM directories WHERE last_synced_at IS NULL ORDER BY path",
+        )?;
+
+        let directories = stmt
+            .query_map([], |row| {
+                Ok(Directory {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    file_count: row.get(2)?,
+                    last_synced_at: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(directories)
+    }
+
     /// Get a directory by ID.
     pub fn get_by_id(&self, id: i64) -> Result<Option<Directory>> {
         let result = self.conn.query_row(

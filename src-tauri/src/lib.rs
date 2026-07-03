@@ -38,9 +38,11 @@ pub fn run() {
             commands::directories_add,
             commands::directories_remove,
             commands::directories_get,
+            commands::directories_incomplete,
             // Indexing commands
             commands::indexing_start,
             commands::indexing_resync,
+            commands::indexing_resume,
             commands::indexing_cancel,
             // Search commands
             commands::viewer_query,

@@ -51,6 +51,11 @@
 							<span class="directory-name" title={dir.path}>
 								{getDirectoryName(dir.path)}
 							</span>
+							{#if dir.lastSyncedAt === null}
+								<span class="incomplete-badge" title="Indexing was interrupted — resume from the banner above">
+									Incomplete
+								</span>
+							{/if}
 						</td>
 						<td class="text-center">{dir.fileCount}</td>
 						<td>{formatDate(dir.lastSyncedAt)}</td>
@@ -109,6 +114,23 @@
 	.directory-name {
 		font-family: monospace;
 		font-size: 0.875rem;
+	}
+
+	.incomplete-badge {
+		display: inline-block;
+		margin-left: 0.5rem;
+		padding: 0.0625rem 0.375rem;
+		font-size: 0.6875rem;
+		font-weight: 600;
+		border-radius: 0.25rem;
+		background: #fef3c7;
+		color: #92400e;
+		vertical-align: middle;
+	}
+
+	:global(.dark) .incomplete-badge {
+		background: #451a03;
+		color: #fbbf24;
 	}
 
 	.actions-cell {

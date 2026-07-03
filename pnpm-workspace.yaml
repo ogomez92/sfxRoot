@@ -1,0 +1,6 @@
+# pnpm 11 reads build-script approvals (and other settings) from this file.
+# Allow esbuild (used by Vite) to run its install script so the frontend can build.
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

@@ -72,6 +72,40 @@ pub async fn indexing_resync(
     Ok(result)
 }
 
+/// Resume an interrupted (crashed or cancelled) initial index.
+///
+/// Adds only the files missing from the database and marks the directory
+/// synced when it finishes. Safe to call on a directory that is already
+/// complete.
+#[tauri::command]
+pub async fn indexing_resume(
+    app: AppHandle,
+    directory_id: i64,
+    state: State<'_, AppState>,
+) -> Result<IndexingResult> {
+    let cancel_flag = state.indexing_cancel.clone();
+    let app_clone = app.clone();
+
+    let db_path = state
+        .get_db_path()
+        .ok_or(SfxError::DatabaseNotOpen)?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let db = DatabaseConnection::open(&db_path)?;
+        let service = IndexingService::new(cancel_flag);
+
+        service.resume_directory(&db, directory_id, |progress| {
+            let _ = app_clone.emit("indexing:progress", &progress);
+        })
+    })
+    .await
+    .map_err(|e| SfxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))??;
+
+    let _ = app.emit("indexing:complete", &result);
+
+    Ok(result)
+}
+
 /// Cancel ongoing indexing operation.
 #[tauri::command]
 pub async fn indexing_cancel(state: State<'_, AppState>) -> Result<()> {
